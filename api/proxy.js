@@ -1,83 +1,74 @@
-// api/proxy.js
+// /api/proxy.js  — Daskalo AI Proxy
+// Λειτουργεί με Vercel serverless και προστατεύει το OpenAI API key
 
-// Επιτρεπόμενες προελεύσεις (CORS) — βάλε το Blogspot domain σου στο Vercel (env CORS_ORIGIN)
-const allowedOrigins = (process.env.CORS_ORIGIN || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+// --- Απλό rate limit ανά IP (3 αιτήματα / 10 δευτερόλεπτα)
+const recentCalls = new Map();
+function isRateLimited(ip) {
+  const now = Date.now();
+  const windowMs = 10 * 1000; // 10 δευτερόλεπτα
+  const limit = 3; // όριο αιτημάτων
 
-function setCors(req, res) {
-  const origin = req.headers.origin || "";
-  if (!allowedOrigins.length || allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  }
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  const calls = recentCalls.get(ip) || [];
+  const recent = calls.filter(ts => now - ts < windowMs);
+  recent.push(now);
+  recentCalls.set(ip, recent);
+  return recent.length > limit;
 }
 
 export default async function handler(req, res) {
-  setCors(req, res);
+  // --- CORS μόνο για το blog σου (όχι *)
+  res.setHeader('Access-Control-Allow-Origin', 'https://diadrastika-dimotiko.blogspot.com');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Προ-έλεγχος CORS
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  // Υγεία endpoint για γρήγορο έλεγχο
-  if (req.method === "GET") {
-    return res.status(200).json({ ok: true, msg: "daskalo-ai-proxy live" });
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+  // --- Rate limit
+  const ip =
+    req.headers['x-forwarded-for']?.split(',')[0] ||
+    req.connection?.remoteAddress ||
+    'unknown';
+  if (isRateLimited(ip)) {
+    return res.status(429).json({ error: 'Rate limit exceeded. Περίμενε λίγο πριν ξαναστείλεις.' });
   }
 
   try {
-    // Μπορεί να έρθει stringified JSON από μερικά widgets
-    let payload = req.body;
-    if (typeof payload === "string") {
-      try { payload = JSON.parse(payload); } catch {}
+    const { messages, meta } = req.body || {};
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Bad request — messages array missing.' });
     }
 
-    const { prompt, temperature = 0.2, max_tokens = 350 } = payload || {};
-    if (!prompt) {
-      return res.status(400).json({ error: "Missing prompt" });
-    }
+    // --- Επιλογή μοντέλου
+    const model =
+      meta?.activity === 'summary'
+        ? 'gpt-4o-mini'
+        : meta?.activity === 'exercise'
+        ? 'gpt-4o-mini'
+        : 'gpt-4o-mini';
 
-    // Timeout ασφαλείας
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 25000);
-
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
+    // --- Κλήση OpenAI API
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature,
-        max_tokens,
-        messages: [
-          { role: "system", content: "Είσαι βοηθός για εκπαιδευτικό Blogspot. Απαντάς απλά, καθαρά και σύντομα για παιδιά δημοτικού." },
-          { role: "user", content: prompt }
-        ]
-      }),
-      signal: controller.signal
+        model,
+        temperature: 0.5,
+        messages
+      })
     });
 
-    clearTimeout(timer);
-
-    const data = await resp.json();
-    if (!resp.ok) {
-      return res.status(resp.status).json(data);
+    if (!r.ok) {
+      const txt = await r.text();
+      return res.status(500).json({ error: 'LLM error', detail: txt });
     }
 
-    // Επιστρέφουμε καθαρό κείμενο + τα raw για debugging αν τα χρειαστούμε
-    const text = data?.choices?.[0]?.message?.content ?? "";
-    return res.status(200).json({ text, raw: data });
+    const json = await r.json();
+    const reply = json.choices?.[0]?.message?.content || '—';
+    return res.status(200).json({ reply, ok: true });
   } catch (err) {
-    console.error("Proxy error:", err);
-    const message = err?.name === "AbortError" ? "Upstream timeout" : "Internal Server Error";
-    return res.status(500).json({ error: message });
+    console.error('Proxy error:', err);
+    return res.status(500).json({ error: 'Server error', detail: String(err) });
   }
 }
