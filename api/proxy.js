@@ -1,20 +1,36 @@
 // /api/proxy.js — Daskalo AI Proxy (Vercel)
-// Δέχεται δύο σχήματα:
-// A) { prompt, recaptchaToken?, temperature?, max_tokens?, meta? }
-// B) { messages: [...], meta? }
-// Περιλαμβάνει: CORS μόνο για το blog σου + απλό rate-limit + (προαιρετική) reCAPTCHA επαλήθευση
+// Δέχεται:
+//  A) { prompt, recaptchaToken?, temperature?, max_tokens?, meta? }
+//  B) { messages: [...], meta? }
+// Περιλαμβάνει: CORS από ENV (kidai.gr), απλό rate-limit, (προαιρετικό) reCAPTCHA
 
-// Διαβάζουμε από ENV (π.χ. "https://www.kidai.gr,https://kidai.gr")
+/* ========================= CORS ========================= */
+/** Περιμένει ENV CORS_ORIGIN π.χ. "https://www.kidai.gr,https://kidai.gr" */
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || 'https://www.kidai.gr,https://kidai.gr')
   .split(',')
-  .map(s => s.trim());
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function getOriginFromReq(req) {
+  // Σε Vercel (Node), τα headers είναι object. Δεν υπάρχει headers.get.
+  const h = req?.headers || {};
+  const origin = h.origin || h.Origin || '';
+  if (origin) return origin;
+  // fallback: πήγαινε από το referer (αν υπάρχει) και πάρε το origin
+  try {
+    const ref = h.referer || h.Referer || '';
+    if (ref) return new URL(ref).origin;
+  } catch {}
+  return '';
+}
 
 function pickCorsOrigin(req) {
-  const origin = (req.headers.get ? req.headers.get('origin') : req.headers.origin) || '';
+  const origin = getOriginFromReq(req);
   return ALLOWED_ORIGINS.includes(origin) ? origin : (ALLOWED_ORIGINS[0] || '*');
 }
 
-// --- Απλό rate limit ανά IP (3 αιτήματα / 10s)
+/* ====================== Rate Limiting ==================== */
+// 3 αιτήματα / 10s ανά IP (απλό in-memory — αρκεί για hobby)
 const recentCalls = new Map();
 function isRateLimited(ip) {
   const now = Date.now();
@@ -27,7 +43,7 @@ function isRateLimited(ip) {
   return fresh.length > limit;
 }
 
-// Build system prompt από meta (αν υπάρχει)
+/* =================== System prompt builder =================== */
 function buildSystem(meta = {}) {
   const role = meta.role || 'child';
   const grade = meta.grade || 'A';
@@ -45,7 +61,7 @@ function buildSystem(meta = {}) {
   return bits.join(' ');
 }
 
-// (Προαιρετικό) Server-side επαλήθευση reCAPTCHA v2
+/* ================= reCAPTCHA (προαιρετικό) ================= */
 async function verifyRecaptchaIfConfigured(token) {
   const secret = process.env.RECAPTCHA_SECRET;
   if (!token || !secret) return { ok: true }; // δεν ελέγχουμε αν δεν έχει ρυθμιστεί
@@ -62,14 +78,14 @@ async function verifyRecaptchaIfConfigured(token) {
   }
 }
 
+/* ======================= Handler ======================== */
 export default async function handler(req, res) {
-  // --- CORS
-const corsOrigin = pickCorsOrigin(req);
-res.setHeader('Access-Control-Allow-Origin', corsOrigin);
-res.setHeader('Vary', 'Origin');
-res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
+  // --- CORS headers (δυναμικά από ENV)
+  const corsOrigin = pickCorsOrigin(req);
+  res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed. Use POST.' });
@@ -83,7 +99,7 @@ res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     return res.status(429).json({ error: 'Rate limit exceeded. Περίμενε λίγο.' });
   }
 
-  // --- Parse σώματος με ασφάλεια (Vercel μπορεί να στείλει string ή object)
+  // --- Safe body parse (μπορεί να έρθει string ή object)
   let body = {};
   try {
     if (req.body && Object.keys(req.body).length) {
@@ -98,10 +114,9 @@ res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     return res.status(400).json({ error: 'Invalid JSON body' });
   }
 
-  // --- Υποστήριξη και για prompt+token ΚΑΙ για messages[]
+  // --- Υποστήριξη και για prompt ΚΑΙ για messages[]
   let { messages, meta, prompt, recaptchaToken, temperature, max_tokens } = body;
 
-  // Αν δεν μας έστειλαν messages[] αλλά prompt, το μετατρέπουμε
   if ((!Array.isArray(messages) || messages.length === 0) && typeof prompt === 'string') {
     const sys = buildSystem(meta);
     messages = [
@@ -114,13 +129,13 @@ res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     return res.status(400).json({ error: 'Bad request — messages[] required.' });
   }
 
-  // (Προαιρετικό) reCAPTCHA server-side check (αν έχεις βάλει RECAPTCHA_SECRET)
+  // (προαιρετικό) reCAPTCHA
   const recap = await verifyRecaptchaIfConfigured(recaptchaToken);
   if (!recap.ok) {
     return res.status(400).json({ error: 'reCAPTCHA failed', detail: recap.detail });
   }
 
-  // Επιλογή μοντέλου (απλή λογική, μπορείς να αλλάξεις)
+  // Μοντέλο (μπορείς να αλλάξεις όποτε θέλεις)
   const model =
     meta?.activity === 'summary' ? 'gpt-4o-mini'
     : meta?.activity === 'exercise' ? 'gpt-4o-mini'
@@ -149,10 +164,14 @@ res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     const json = await r.json();
     const reply = json.choices?.[0]?.message?.content || '—';
-    return res.status(200).json({ ok: true, reply, raw: process.env.NODE_ENV === 'development' ? json : undefined });
+    return res.status(200).json({
+      ok: true,
+      reply,
+      // Σε production κρύβουμε το raw για ασφάλεια
+      raw: process.env.NODE_ENV === 'development' ? json : undefined
+    });
   } catch (err) {
     console.error('Proxy error:', err);
     return res.status(500).json({ error: 'Server error', detail: String(err) });
   }
 }
-
