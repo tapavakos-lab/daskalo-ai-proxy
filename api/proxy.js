@@ -4,7 +4,15 @@
 // B) { messages: [...], meta? }
 // Περιλαμβάνει: CORS μόνο για το blog σου + απλό rate-limit + (προαιρετική) reCAPTCHA επαλήθευση
 
-const ALLOWED_ORIGIN = 'https://diadrastika-dimotiko.blogspot.com';
+// Διαβάζουμε από ENV (π.χ. "https://www.kidai.gr,https://kidai.gr")
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || 'https://www.kidai.gr,https://kidai.gr')
+  .split(',')
+  .map(s => s.trim());
+
+function pickCorsOrigin(req) {
+  const origin = (req.headers.get ? req.headers.get('origin') : req.headers.origin) || '';
+  return ALLOWED_ORIGINS.includes(origin) ? origin : (ALLOWED_ORIGINS[0] || '*');
+}
 
 // --- Απλό rate limit ανά IP (3 αιτήματα / 10s)
 const recentCalls = new Map();
@@ -56,10 +64,12 @@ async function verifyRecaptchaIfConfigured(token) {
 
 export default async function handler(req, res) {
   // --- CORS
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+const corsOrigin = pickCorsOrigin(req);
+res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+res.setHeader('Vary', 'Origin');
+res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
 
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed. Use POST.' });
