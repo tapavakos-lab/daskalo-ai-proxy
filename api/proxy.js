@@ -8,9 +8,15 @@ let ALLOWED = RAW
   .map(s => s.trim().toLowerCase().replace(/\/+$/, ''))
   .filter(Boolean);
 
-// Αν δεν υπάρχει ENV στη Edge, βάλε default τους δύο τομείς
+// Αν δεν υπάρχει ENV στη Edge, βάλε default τους τομείς που χρησιμοποιείς
 if (ALLOWED.length === 0) {
-  ALLOWED = ['https://www.kidai.gr', 'https://kidai.gr'];
+  ALLOWED = [
+    'https://kidai.gr',
+    'https://www.kidai.gr',
+    // Αν σερβίρεις/δοκιμάζεις μέσα από το Blogger:
+    'https://diadrastika-dimotiko.blogspot.com',
+    'https://www.blogger.com', // προεπισκόπηση/editor
+  ];
 }
 
 function buildCorsHeaders(origin) {
@@ -30,28 +36,41 @@ function buildCorsHeaders(origin) {
     h.set('Access-Control-Allow-Headers', 'Content-Type,Authorization');
     h.set('Access-Control-Max-Age', '86400');
   }
-  return h;
+  return { headers: h, ok };
 }
 
 export default async function handler(req) {
   const origin = req.headers.get('origin') || '';
-  const cors = buildCorsHeaders(origin);
+  const { headers: cors, ok: originOK } = buildCorsHeaders(origin);
   const hasACAO = cors.has('Access-Control-Allow-Origin');
 
-  // Preflight
+  // --- Preflight ---
   if (req.method === 'OPTIONS') {
+    // Αν το origin δεν επιτρέπεται, δώσε 403, αλλιώς 204 με ACAO
+    if (!hasACAO) {
+      return new Response(JSON.stringify({ error: 'origin_not_allowed' }), {
+        status: 403,
+        headers: new Headers({
+          ...Object.fromEntries(cors),
+          'Content-Type': 'application/json; charset=utf-8'
+        })
+      });
+    }
     return new Response(null, { status: 204, headers: cors });
   }
 
-  // Μόνο επιτρεπτά origins
-  if (!hasACAO) {
+  // --- Μπλοκάρισμα για μη επιτρεπτά origins ---
+  if (!originOK) {
     return new Response(JSON.stringify({ error: 'origin_not_allowed' }), {
       status: 403,
-      headers: new Headers({ ...Object.fromEntries(cors), 'Content-Type': 'application/json; charset=utf-8' })
+      headers: new Headers({
+        ...Object.fromEntries(cors),
+        'Content-Type': 'application/json; charset=utf-8'
+      })
     });
   }
 
-  // Διαβάζουμε σώμα
+  // --- Διαβάζουμε σώμα ---
   let prompt = '';
   try {
     const body = await req.json();
@@ -60,7 +79,10 @@ export default async function handler(req) {
   if (!prompt) {
     return new Response(JSON.stringify({ error: 'missing_prompt' }), {
       status: 400,
-      headers: new Headers({ ...Object.fromEntries(cors), 'Content-Type': 'application/json; charset=utf-8' })
+      headers: new Headers({
+        ...Object.fromEntries(cors),
+        'Content-Type': 'application/json; charset=utf-8'
+      })
     });
   }
 
@@ -68,13 +90,16 @@ export default async function handler(req) {
   if (!apiKey) {
     return new Response(JSON.stringify({ error: 'no_api_key' }), {
       status: 401,
-      headers: new Headers({ ...Object.fromEntries(cors), 'Content-Type': 'application/json; charset=utf-8' })
+      headers: new Headers({
+        ...Object.fromEntries(cors),
+        'Content-Type': 'application/json; charset=utf-8'
+      })
     });
   }
 
-  // Κλήση OpenAI
+  // --- Κλήση OpenAI ---
   const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort('upstream_timeout'), 12000);
+  const to = setTimeout(() => ctrl.abort('upstream_timeout'), 20000);
 
   try {
     const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -95,14 +120,20 @@ export default async function handler(req) {
 
     return new Response(text, {
       status: upstream.status,
-      headers: new Headers({ ...Object.fromEntries(cors), 'Content-Type': 'application/json; charset=utf-8' })
+      headers: new Headers({
+        ...Object.fromEntries(cors),
+        'Content-Type': 'application/json; charset=utf-8'
+      })
     });
   } catch (err) {
     clearTimeout(to);
     const code = (err && err.name === 'AbortError') ? 'upstream_timeout' : 'proxy_failure';
     return new Response(JSON.stringify({ error: code }), {
       status: 504,
-      headers: new Headers({ ...Object.fromEntries(cors), 'Content-Type': 'application/json; charset=utf-8' })
+      headers: new Headers({
+        ...Object.fromEntries(cors),
+        'Content-Type': 'application/json; charset=utf-8'
+      })
     });
   }
 }
