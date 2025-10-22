@@ -1,31 +1,41 @@
 // api/proxy.js
 export const config = { runtime: 'edge' };
 
-// Allow-list από ENV (χωρίς κενά, χωρίς / στο τέλος)
-const ALLOWED = (process.env.CORS_ORIGIN || '')
+// --- ALLOW LIST (με ασφαλές fallback & debug) ---
+const RAW = (process.env.CORS_ORIGIN || '').trim();
+let ALLOWED = RAW
   .split(',')
   .map(s => s.trim().toLowerCase().replace(/\/+$/, ''))
   .filter(Boolean);
 
-function corsHeadersFor(origin) {
+// Αν δεν υπάρχει ENV στη Edge, βάλε default τους δύο τομείς
+if (ALLOWED.length === 0) {
+  ALLOWED = ['https://www.kidai.gr', 'https://kidai.gr'];
+}
+
+function buildCorsHeaders(origin) {
   const norm = (origin || '').toLowerCase().replace(/\/+$/, '');
-  if (ALLOWED.includes(norm)) {
-    // ΕΠΙΣΤΡΕΦΟΥΜΕ ΜΟΝΟ ΜΙΑ ΤΙΜΗ (το ίδιο το origin)
-    return new Headers({
-      'Access-Control-Allow-Origin': origin,
-      'Vary': 'Origin',
-      'Access-Control-Allow-Methods': 'POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-      'Access-Control-Max-Age': '86400'
-    });
+  const ok = ALLOWED.includes(norm);
+
+  const h = new Headers({
+    'Vary': 'Origin',
+    'x-debug-raw': RAW || '(empty)',
+    'x-debug-allowed': ALLOWED.join('|'),
+    'x-debug-origin': origin || '(no-origin)'
+  });
+
+  if (ok) {
+    h.set('Access-Control-Allow-Origin', origin);
+    h.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+    h.set('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    h.set('Access-Control-Max-Age', '86400');
   }
-  // Άγνωστο origin: καμία ACAO (ο browser θα μπλοκάρει)
-  return new Headers({ 'Vary': 'Origin' });
+  return h;
 }
 
 export default async function handler(req) {
   const origin = req.headers.get('origin') || '';
-  const cors = corsHeadersFor(origin);
+  const cors = buildCorsHeaders(origin);
   const hasACAO = cors.has('Access-Control-Allow-Origin');
 
   // Preflight
@@ -33,7 +43,7 @@ export default async function handler(req) {
     return new Response(null, { status: 204, headers: cors });
   }
 
-  // Επιτρέπουμε POST μόνο από επιτρεπτά origins
+  // Μόνο επιτρεπτά origins
   if (!hasACAO) {
     return new Response(JSON.stringify({ error: 'origin_not_allowed' }), {
       status: 403,
@@ -62,7 +72,7 @@ export default async function handler(req) {
     });
   }
 
-  // Κλήση προς OpenAI (με timeout)
+  // Κλήση OpenAI
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort('upstream_timeout'), 12000);
 
